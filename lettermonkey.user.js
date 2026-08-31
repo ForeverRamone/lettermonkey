@@ -1,11 +1,13 @@
 // ==UserScript==
 // @name         LetterMonkey — Plex / Radarr / Sonarr en Letterboxd
 // @namespace    lettermonkey
-// @version      1.0.0
+// @version      1.1.0
 // @description  Marca sobre cada póster de Letterboxd si la película ya está en tu Plex, y envía a Radarr o Sonarr con un clic las que faltan.
 // @author       ForeverRamone
 // @match        https://letterboxd.com/*
 // @match        https://*.letterboxd.com/*
+// @updateURL    https://raw.githubusercontent.com/ForeverRamone/lettermonkey/main/lettermonkey.user.js
+// @downloadURL  https://raw.githubusercontent.com/ForeverRamone/lettermonkey/main/lettermonkey.user.js
 // @run-at       document-idle
 // @noframes
 // @grant        GM_xmlhttpRequest

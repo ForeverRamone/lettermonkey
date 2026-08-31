@@ -11,11 +11,13 @@ DOM y la forma de averiguar el identificador de TMDB.
 ## Instalación
 
 1. Instala [Tampermonkey](https://www.tampermonkey.net/) en tu navegador.
-2. Abre su panel, elige "Crear un nuevo script", borra la plantilla y pega el
-   contenido de [`lettermonkey.user.js`](lettermonkey.user.js).
-3. Guarda con Ctrl+S.
-4. Abre el menú de Tampermonkey en cualquier página de Letterboxd y elige
+2. Abre [este enlace](https://raw.githubusercontent.com/ForeverRamone/lettermonkey/main/lettermonkey.user.js): Tampermonkey
+   reconoce el archivo y ofrece instalarlo. Si prefieres hacerlo a mano, crea un
+   script nuevo y pega el contenido de [`lettermonkey.user.js`](lettermonkey.user.js).
+3. Abre el menú de Tampermonkey en cualquier página de Letterboxd y elige
    **LetterMonkey: ajustes**.
+
+Instalado así, Tampermonkey avisa por su cuenta cuando hay una versión nueva.
 
 ## Configuración
 
