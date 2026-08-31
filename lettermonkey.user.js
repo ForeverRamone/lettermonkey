@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LetterMonkey — Plex / Radarr / Sonarr en Letterboxd
 // @namespace    lettermonkey
-// @version      1.3.0
+// @version      1.3.1
 // @description  Marca sobre cada póster de Letterboxd si la película ya está en tu Plex, y envía a Radarr o Sonarr con un clic las que faltan.
 // @author       ForeverRamone
 // @match        https://letterboxd.com/*
@@ -884,7 +884,8 @@
         '.ltm-unknown { background:#6b6b6b; }',
         '.ltm-error { background:#a02020; }',
         '.ltm-loading, .ltm-busy { background:#4a4a4a; opacity:.75; cursor:default; }',
-        '.ltm-picker { position:absolute; z-index:99999; width:340px; max-height:420px; overflow:auto;',
+        '.ltm-picker { position:absolute; z-index:99999; width:340px; max-height:420px; overflow-y:auto;',
+        '  overscroll-behavior: contain;',
         '  background:#1e1e1e; color:#eee; border:1px solid #444; border-radius:8px;',
         '  font: 13px/1.35 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; box-shadow:0 8px 28px rgba(0,0,0,.6); }',
         '.ltm-picker-head { padding:9px 12px; font-weight:700; border-bottom:1px solid #383838; background:#262626; }',
@@ -1261,7 +1262,16 @@
         if (e.target.classList && e.target.classList.contains('ltm-chip')) return;
         closePicker();
     }, true);
-    window.addEventListener('scroll', function () { if (pickerEl) closePicker(); }, true);
+    // El panel se cierra si se desplaza la página, pero no si lo que se
+    // desplaza es su propia lista: al escuchar en fase de captura, el scroll de
+    // dentro llegaba aquí y lo cerraba, de modo que no había forma de bajar a
+    // ver el resto de candidatos ni con la rueda ni con la barra.
+    window.addEventListener('scroll', function (e) {
+        if (!pickerEl) return;
+        const destino = e.target;
+        if (destino && destino.nodeType === 1 && pickerEl.contains(destino)) return;
+        closePicker();
+    }, true);
 
     /* ================================================================== *
      * 13. Avisos
