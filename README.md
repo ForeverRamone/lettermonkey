@@ -60,7 +60,11 @@ la restricción de verdad la impone el script.
 | Rojo, `!` | Error; el motivo está en el tooltip | Reintenta |
 
 **Mayús+clic** sobre cualquier distintivo abre el selector de candidatos, por si
-una coincidencia automática es incorrecta. La elección se guarda para siempre.
+una coincidencia automática es incorrecta. La que esté en uso aparece la primera
+y marcada en verde. La elección se guarda para siempre.
+
+Nunca se da por buena una coincidencia que solo se parezca: si ningún título
+cuadra exactamente, se pide elegir en lugar de arriesgar.
 
 ## Cómo funciona
 
@@ -72,8 +76,11 @@ Para saber a qué película de TMDB corresponde cada póster, Letterboxd pone la
 cosas mucho más fáciles que otras webs:
 
 - **En una ficha** el identificador viene dado. Letterboxd lo publica en el
-  propio `<body>`, en `data-tmdb-id`, así que la coincidencia es exacta y no
-  hace falta ni una petición.
+  propio `<body>`, en `data-tmdb-id`, y además en el enlace a TMDB del pie, que
+  sirve de respaldo. La coincidencia es exacta y no cuesta ni una petición, y
+  manda sobre cualquier cosa que se hubiera deducido antes desde una rejilla:
+  abrir la ficha corrige lo que estuviera mal guardado. Lo que hayas elegido a
+  mano se respeta.
 - **En rejillas y listas** cada póster lleva el título y el año en
   `data-item-name` ("Interstellar (2014)"). Como los datos de Letterboxd salen
   de TMDB, buscar por título y año acierta a la primera casi siempre.

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LetterMonkey — Plex / Radarr / Sonarr en Letterboxd
 // @namespace    lettermonkey
-// @version      1.2.1
+// @version      1.3.0
 // @description  Marca sobre cada póster de Letterboxd si la película ya está en tu Plex, y envía a Radarr o Sonarr con un clic las que faltan.
 // @author       ForeverRamone
 // @match        https://letterboxd.com/*
@@ -235,6 +235,11 @@
         return (data.results || []).slice(0, 10).map(function (r) { return tmdbItem(kind, r); });
     }
 
+    async function tmdbPorId(kind, id) {
+        const data = await gmJSON({ url: tmdbUrl('/' + kind + '/' + id, { language: 'es-ES' }) });
+        return tmdbItem(kind, data);
+    }
+
     async function tmdbTvdbId(tmdbId) {
         if (Object.prototype.hasOwnProperty.call(store.tvdb, tmdbId)) return store.tvdb[tmdbId];
         const data = await gmJSON({ url: tmdbUrl('/tv/' + tmdbId + '/external_ids', {}) });
@@ -325,8 +330,19 @@
     function readFilmPage(doc) {
         const body = doc.body;
         if (!body) return null;
-        const id = parseInt(body.getAttribute('data-tmdb-id'), 10) || null;
-        const rawType = body.getAttribute('data-tmdb-type') || 'movie';
+        let id = parseInt(body.getAttribute('data-tmdb-id'), 10) || null;
+        let rawType = body.getAttribute('data-tmdb-type') || '';
+        if (!id) {
+            // Segunda fuente por si el atributo no viniera: el enlace a TMDB
+            // que Letterboxd pone al pie de la ficha.
+            const a = doc.querySelector('a[href*="themoviedb.org/movie/"], a[href*="themoviedb.org/tv/"]');
+            const m = a ? /themoviedb\.org\/(movie|tv)\/(\d+)/.exec(a.getAttribute('href') || '') : null;
+            if (m) {
+                rawType = rawType || m[1];
+                id = parseInt(m[2], 10) || null;
+            }
+        }
+        if (!rawType) rawType = 'movie';
         const h1 = doc.querySelector('h1.headline-1');
         const yearEl = doc.querySelector('span.releasedate a');
         const originalEl = doc.querySelector('.originalname');
@@ -382,7 +398,13 @@
             }
 
             s += Math.min(r.popularity, 40) / 40;   // desempate suave
-            return { item: r, score: s };
+
+            // ¿Coincide de verdad algún título, o solo se le parece? Sin una
+            // coincidencia exacta no se da nada por bueno: es lo que llevaba a
+            // emparejar "Genesis" con "Genesis: The Fall of Eden".
+            const exacto = (nTitle && (nt === nTitle || no === nTitle)) ||
+                           (nOriginal && (no === nOriginal || nt === nOriginal));
+            return { item: r, score: s, exacto: !!exacto };
         });
         list.sort(function (a, b) { return b.score - a.score; });
         return list;
@@ -391,6 +413,7 @@
     function isConfident(scored) {
         if (!scored.length) return false;
         if (scored[0].score < 5) return false;
+        if (!scored[0].exacto) return false;
         if (scored.length === 1) return true;
         return (scored[0].score - scored[1].score) >= 3;
     }
@@ -446,6 +469,20 @@
 
     async function resolveMatch(meta) {
         const cached = store.map[meta.slug];
+
+        // El identificador que publica la propia ficha manda sobre cualquier
+        // coincidencia deducida antes buscando por título desde una rejilla,
+        // que es donde se cuelan los errores. Así, abrir la ficha corrige lo
+        // que estuviera mal guardado. Lo que hayas elegido a mano se respeta.
+        if (meta.tmdbId && (!cached || !cached.m)) {
+            const directo = matchFromPage(meta, meta);
+            if (!cached || cached.i !== directo.id || cached.k !== directo.kind) {
+                store.map[meta.slug] = { k: directo.kind, i: directo.id, t: directo.title, y: directo.year };
+                flushSoon();
+            }
+            return { match: directo, candidates: [], meta: meta };
+        }
+
         if (cached) {
             if (cached.none) return { match: null, candidates: [], ignored: true, meta: meta };
             return {
@@ -453,14 +490,6 @@
                 cached: true,
                 meta: meta
             };
-        }
-
-        // 1. En la propia ficha el id viene dado: cero peticiones.
-        if (meta.tmdbId) {
-            const direct = matchFromPage(meta, meta);
-            store.map[meta.slug] = { k: direct.kind, i: direct.id, t: direct.title, y: direct.year };
-            flushSoon();
-            return { match: direct, candidates: [], meta: meta };
         }
 
         const known = store.meta[meta.slug];
@@ -862,6 +891,8 @@
         '.ltm-picker-body { padding:4px; }',
         '.ltm-row { display:flex; gap:9px; padding:7px; border-radius:6px; cursor:pointer; align-items:center; }',
         '.ltm-row:hover { background:#333; }',
+        '.ltm-actual { background:#26331f; box-shadow: inset 3px 0 0 #8bc34a; }',
+        '.ltm-actual .ltm-s { color:#8bc34a; }',
         '.ltm-row img { width:40px; height:60px; object-fit:cover; border-radius:3px; background:#333; flex:0 0 auto; }',
         '.ltm-row .ltm-t { font-weight:600; }',
         '.ltm-row .ltm-s { color:#aaa; font-size:12px; }',
@@ -1128,6 +1159,25 @@
                 chip._candidates = cands;
             } catch (e) { cands = []; }
         }
+        // La coincidencia en uso va siempre la primera y marcada, aunque la
+        // búsqueda por título no la devuelva. En una ficha el identificador lo
+        // publica la propia web, y entonces la lista de abajo no tiene por qué
+        // contenerla: sin esto parecía que el emparejamiento hubiera fallado.
+        if (chip._match) {
+            const presente = cands.some(function (c) {
+                return c.kind === chip._match.kind && c.id === chip._match.id;
+            });
+            if (!presente) {
+                let actual = null;
+                try {
+                    actual = await tmdbPorId(chip._match.kind, chip._match.id);
+                } catch (e) {
+                    actual = Object.assign({ poster: null, overview: '', original: '' }, chip._match);
+                }
+                cands = [actual].concat(cands);
+            }
+        }
+
         if (pickerEl !== box) return;
         renderPicker(box, chip, cands);
     }
@@ -1141,8 +1191,9 @@
         }
 
         cands.forEach(function (item) {
+            const esActual = chip._match && chip._match.kind === item.kind && chip._match.id === item.id;
             const row = document.createElement('div');
-            row.className = 'ltm-row';
+            row.className = 'ltm-row' + (esActual ? ' ltm-actual' : '');
 
             const img = document.createElement('img');
             img.src = item.poster ? 'https://image.tmdb.org/t/p/w92' + item.poster : '';
@@ -1156,6 +1207,7 @@
             const s = document.createElement('div');
             s.className = 'ltm-s';
             s.textContent = [
+                esActual ? 'en uso' : '',
                 item.kind === 'tv' ? 'serie' : 'pelicula',
                 item.year || 's/f',
                 item.original && item.original !== item.title ? item.original : ''
