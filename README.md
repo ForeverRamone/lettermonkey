@@ -158,6 +158,9 @@ máquina de Radarr, o enrutar solo ese dominio por otra salida.
 
 - Las rejillas de Letterboxd se cargan por JavaScript y con scroll infinito. El
   script las vigila y va poniendo distintivos según aparecen.
+- Solo se marcan los enlaces a la ficha de una película. Los que Letterboxd
+  inyecta bajo cada póster con el número de visionados, listas y me gusta
+  apuntan también a `/film/...`, pero no son títulos y se ignoran.
 - Los distintivos se resuelven cuando entran en pantalla, no todos de golpe.
 - Cambiar el número de peticiones en paralelo requiere recargar la página.
 - Si Plex, Radarr o Sonarr no responden, el script sigue usando el último índice

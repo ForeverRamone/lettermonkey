@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LetterMonkey — Plex / Radarr / Sonarr en Letterboxd
 // @namespace    lettermonkey
-// @version      1.2.0
+// @version      1.2.1
 // @description  Marca sobre cada póster de Letterboxd si la película ya está en tu Plex, y envía a Radarr o Sonarr con un clic las que faltan.
 // @author       ForeverRamone
 // @match        https://letterboxd.com/*
@@ -247,21 +247,39 @@
      * 4. Lectura del DOM de Letterboxd
      * ================================================================== */
 
-    const RE_FILM_SLUG = /^\/film\/([^/?#]+)/;
+    // Cualquier página de una película, incluidas sus pestañas (/crew/, /details/).
+    const RE_FILM_PATH = /^\/film\/([^/?#]+)/;
+    // Solo el enlace a la ficha. Bajo cada póster, Letterboxd inyecta al cargar
+    // una fila de estadísticas cuyos enlaces son /film/loquesea/members/,
+    // /lists/ y /likes/: no son títulos y no deben llevar distintivo.
+    const RE_FILM_LINK = /^\/film\/([^/?#]+)\/?(?:[?#].*)?$/;
 
-    function slugFromHref(href) {
+    function rutaDe(href) {
         if (!href) return null;
         let p = String(href);
         const abs = p.match(/letterboxd\.com(\/.*)$/);
         if (abs) p = abs[1];
-        const m = RE_FILM_SLUG.exec(p);
+        return p.charAt(0) === '/' ? p : null;
+    }
+
+    // Para enlaces: estricto, solo la ficha.
+    function slugFromHref(href) {
+        const p = rutaDe(href);
+        if (!p) return null;
+        const m = RE_FILM_LINK.exec(p);
+        return m ? m[1] : null;
+    }
+
+    // Para la página en la que se está: permisivo, las pestañas también valen.
+    function slugFromPath(path) {
+        const m = RE_FILM_PATH.exec(String(path || ''));
         return m ? m[1] : null;
     }
 
     function isFilmPage() {
         return !!document.body &&
                document.body.getAttribute('data-type') === 'film' &&
-               RE_FILM_SLUG.test(location.pathname);
+               RE_FILM_PATH.test(location.pathname);
     }
 
     // "Interstellar (2014)" y tambien "Interstellar (2014) 4.46", que es lo que
@@ -905,7 +923,7 @@
     }
 
     const SELF_SLUG = (document.body && document.body.getAttribute('data-type') === 'film')
-        ? slugFromHref(location.pathname)
+        ? slugFromPath(location.pathname)
         : null;
 
     function mountPoster(box, holder) {
@@ -933,6 +951,8 @@
         });
         if (dup) return;
 
+        if (!(a.textContent || '').trim()) return;   // enlaces de icono, sin título
+
         const meta = extractFromPoster(a, null) ||
                      { slug: slug, title: (a.textContent || '').trim(), year: null, original: '', type: 'movie' };
         const chip = makeChip(meta, 'inline');
@@ -943,7 +963,7 @@
     function mountFilmPage() {
         const h1 = document.querySelector('h1.headline-1');
         if (!h1 || h1.querySelector('.ltm-chip')) return;
-        const slug = slugFromHref(location.pathname);
+        const slug = slugFromPath(location.pathname);
         if (!slug) return;
         const page = readFilmPage(document);
         if (!page) return;
