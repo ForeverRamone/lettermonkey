@@ -88,9 +88,15 @@ cosas mucho más fáciles que otras webs:
   ahí el identificador exacto. Ese caso es raro, y el resultado se cachea para
   siempre.
 
-Letterboxd cataloga películas, así que lo normal es que todo vaya a Radarr. Para
-las contadas entradas que TMDB clasifica como serie, el script lo detecta por
-`data-tmdb-type` y las manda a Sonarr.
+Letterboxd cataloga películas, así que lo normal es que todo vaya a Radarr. Pero
+hay entradas que TMDB tiene como serie —miniseries sobre todo, del tipo *The
+Penguin* o *Something Very Bad Is Going to Happen*—, y esas van a Sonarr.
+
+Distinguirlas tiene truco, porque Letterboxd no lo pone fácil: en esas fichas
+deja `data-tmdb-type` valiendo `movie`, que es mentira, y encima vacía
+`data-tmdb-id`. Lo único fiable es el enlace a TMDB del pie de la ficha, que es
+la dirección canónica y lleva `movie` o `tv` en la propia ruta. El script mira
+ahí primero y solo usa los atributos del `<body>` como respaldo.
 
 ### La primera carga
 

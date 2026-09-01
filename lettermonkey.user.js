@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LetterMonkey — Plex / Radarr / Sonarr en Letterboxd
 // @namespace    lettermonkey
-// @version      1.4.0
+// @version      1.5.0
 // @description  Marca sobre cada póster de Letterboxd si la película ya está en tu Plex, y envía a Radarr o Sonarr con un clic las que faltan.
 // @author       ForeverRamone
 // @match        https://letterboxd.com/*
@@ -32,6 +32,7 @@
     const MAP_KEY  = 'lettermonkey.map';    // slug  -> coincidencia TMDB
     const META_KEY = 'lettermonkey.meta';   // slug  -> datos leídos de la ficha
     const TVDB_KEY = 'lettermonkey.tvdb';   // tmdb  -> tvdb (solo series)
+    const ESQ_KEY  = 'lettermonkey.esquema'; // version de lo guardado
     const IDX_KEY  = 'lettermonkey.index';  // índices de Plex / Radarr / Sonarr
 
     const DEFAULTS = {
@@ -78,6 +79,29 @@
         meta: readJSON(META_KEY, {}),
         tvdb: readJSON(TVDB_KEY, {})
     };
+
+    // Hasta la 1.5.0 las series de Letterboxd se guardaban como películas, con
+    // un identificador que en el catálogo de películas de TMDB es otra cosa. No
+    // hay manera de saber a posteriori cuáles salieron mal, así que se tira una
+    // sola vez todo lo deducido y se vuelve a resolver. Lo que elegiste a mano y
+    // lo que marcaste como ignorado se queda: eso el fallo no lo tocó nunca.
+    const ESQUEMA = 2;
+
+    function migrarCache() {
+        if (readJSON(ESQ_KEY, 0) >= ESQUEMA) return;
+        const conservado = {};
+        Object.keys(store.map).forEach(function (slug) {
+            const e = store.map[slug];
+            if (e && (e.m || e.none)) conservado[slug] = e;
+        });
+        store.map = conservado;
+        store.meta = {};
+        writeJSON(MAP_KEY, store.map);
+        writeJSON(META_KEY, store.meta);
+        writeJSON(ESQ_KEY, ESQUEMA);
+    }
+
+    migrarCache();
 
     let flushTimer = null;
     function flushSoon() {
@@ -365,17 +389,23 @@
     function readFilmPage(doc) {
         const body = doc.body;
         if (!body) return null;
-        let id = parseInt(body.getAttribute('data-tmdb-id'), 10) || null;
-        let rawType = body.getAttribute('data-tmdb-type') || '';
+        // La fuente buena es el enlace a TMDB del pie: es la URL canónica y
+        // dice en la propia ruta si aquello es movie o tv. Los atributos del
+        // body solo valen de respaldo, y solo para películas: en las series
+        // Letterboxd deja data-tmdb-type en "movie" y además vacía
+        // data-tmdb-id, así que hacerles caso mandaba las miniseries a Radarr
+        // con un identificador que en el catálogo de películas de TMDB es una
+        // película cualquiera sin relación.
+        let id = null, rawType = '';
+        const a = doc.querySelector('a[href*="themoviedb.org/movie/"], a[href*="themoviedb.org/tv/"]');
+        const m = a ? /themoviedb\.org\/(movie|tv)\/(\d+)/.exec(a.getAttribute('href') || '') : null;
+        if (m) {
+            rawType = m[1];
+            id = parseInt(m[2], 10) || null;
+        }
         if (!id) {
-            // Segunda fuente por si el atributo no viniera: el enlace a TMDB
-            // que Letterboxd pone al pie de la ficha.
-            const a = doc.querySelector('a[href*="themoviedb.org/movie/"], a[href*="themoviedb.org/tv/"]');
-            const m = a ? /themoviedb\.org\/(movie|tv)\/(\d+)/.exec(a.getAttribute('href') || '') : null;
-            if (m) {
-                rawType = rawType || m[1];
-                id = parseInt(m[2], 10) || null;
-            }
+            id = parseInt(body.getAttribute('data-tmdb-id'), 10) || null;
+            rawType = body.getAttribute('data-tmdb-type') || '';
         }
         if (!rawType) rawType = 'movie';
         const h1 = doc.querySelector('h1.headline-1');
