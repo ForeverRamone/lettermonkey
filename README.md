@@ -72,6 +72,13 @@ Los catálogos de Plex, Radarr y Sonarr se descargan enteros una vez cada seis
 horas y se indexan por identificador (`tmdb`, `imdb`, `tvdb`). Navegar no genera
 ni una petición a esos servicios: solo se consulta el índice en memoria.
 
+Cada clave del índice lleva delante si es película o serie, y no es un detalle
+menor: TMDB y TVDB numeran los dos catálogos por separado, así que el mismo
+número designa dos cosas distintas. `tmdb://8592` es *Dick Tracy* entre las
+películas y *Parks and Recreation* entre las series. Sin esa distinción, una
+serie que no tienes se quedaba con la ficha de una película que sí, se marcaba
+como presente en Plex y al pulsarla abría la película.
+
 Para saber a qué película de TMDB corresponde cada póster, Letterboxd pone las
 cosas mucho más fáciles que otras webs:
 

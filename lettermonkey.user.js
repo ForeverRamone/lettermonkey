@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LetterMonkey — Plex / Radarr / Sonarr en Letterboxd
 // @namespace    lettermonkey
-// @version      1.5.0
+// @version      1.6.0
 // @description  Marca sobre cada póster de Letterboxd si la película ya está en tu Plex, y envía a Radarr o Sonarr con un clic las que faltan.
 // @author       ForeverRamone
 // @match        https://letterboxd.com/*
@@ -34,6 +34,11 @@
     const TVDB_KEY = 'lettermonkey.tvdb';   // tmdb  -> tvdb (solo series)
     const ESQ_KEY  = 'lettermonkey.esquema'; // version de lo guardado
     const IDX_KEY  = 'lettermonkey.index';  // índices de Plex / Radarr / Sonarr
+
+    // Sube cuando cambia la forma de las claves del índice. Lo guardado con una
+    // versión anterior se tira y se vuelve a descargar, en vez de consultarse
+    // mal y dar por buenas coincidencias que no lo son.
+    const IDX_VERSION = 2;
 
     const DEFAULTS = {
         tmdbKey: '',
@@ -675,10 +680,15 @@
         for (const data of bibliotecas) {
             const list = (data.MediaContainer || {}).Metadata || [];
             for (const it of list) {
+                // El medio va delante de cada clave. En TMDB y en TVDB las
+                // películas y las series se numeran por separado, así que el
+                // mismo número designa dos cosas distintas según el catálogo
+                // del que venga: tmdb://8592 es Dick Tracy entre las películas
+                // y Parks and Recreation entre las series.
+                const medio = it.type === 'show' ? 'tv' : 'movie';
                 const ref = { r: it.ratingKey, t: it.type };
-                const ids = guidsOf(it);
-                for (const g of ids) guid[g] = ref;
-                const key = norm(it.title) + '|' + (it.year || '');
+                for (const g of guidsOf(it)) guid[medio + '|' + g] = ref;
+                const key = medio + '|' + norm(it.title) + '|' + (it.year || '');
                 if (!byTitle[key]) byTitle[key] = ref;
                 items++;
             }
@@ -748,7 +758,8 @@
 
         for (const name of ['plex', 'radarr', 'sonarr']) {
             const entry = cached[name];
-            const fresh = entry && (Date.now() - entry.ts) < ttl;
+            const util  = entry && entry.v === IDX_VERSION;
+            const fresh = util && (Date.now() - entry.ts) < ttl;
             if (!force && fresh) {
                 IDX[name] = entry.data;
                 progServicio(name, 'listo');
@@ -759,12 +770,12 @@
                 BUILDERS[name]()
                     .then(function (data) {
                         IDX[name] = data;
-                        cached[name] = { ts: Date.now(), data: data };
+                        cached[name] = { ts: Date.now(), v: IDX_VERSION, data: data };
                         progServicio(name, 'listo');
                     })
                     .catch(function (err) {
                         IDX[name] = { error: err.message || String(err) };
-                        if (entry) IDX[name] = Object.assign({}, entry.data, { stale: true });
+                        if (util) IDX[name] = Object.assign({}, entry.data, { stale: true });
                         progServicio(name, 'error');
                     })
             );
@@ -788,7 +799,11 @@
 
     async function statusFor(match) {
         const plex = (IDX.plex && IDX.plex.guid) ? IDX.plex : null;
-        let hit = plex ? plex.guid['tmdb:' + match.id] : null;
+        // Sin decir si se busca película o serie, la clave era la misma para
+        // las dos y una serie que no tienes se quedaba con la ficha de una
+        // película que sí: se marcaba en Plex, y al pulsarla abría otra cosa.
+        const medio = match.kind === 'tv' ? 'tv' : 'movie';
+        let hit = plex ? plex.guid[medio + '|tmdb:' + match.id] : null;
         let arr = null;
         let tvdb = null;
 
@@ -798,7 +813,7 @@
             if (!hit || !arr) {
                 try { tvdb = await tmdbTvdbId(match.id); } catch (e) { tvdb = null; }
                 if (tvdb) {
-                    if (!hit && plex) hit = plex.guid['tvdb:' + tvdb] || null;
+                    if (!hit && plex) hit = plex.guid[medio + '|tvdb:' + tvdb] || null;
                     if (!arr) arr = (son.byTvdb || {})[tvdb] || null;
                 }
             }
@@ -808,7 +823,7 @@
 
         // Último recurso: coincidencia por título normalizado y año.
         if (!hit && plex && match.title && match.year) {
-            hit = plex.byTitle[norm(match.title) + '|' + match.year] || null;
+            hit = plex.byTitle[medio + '|' + norm(match.title) + '|' + match.year] || null;
         }
 
         if (hit) {
