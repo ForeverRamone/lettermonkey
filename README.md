@@ -92,6 +92,22 @@ Letterboxd cataloga películas, así que lo normal es que todo vaya a Radarr. Pa
 las contadas entradas que TMDB clasifica como serie, el script lo detecta por
 `data-tmdb-type` y las manda a Sonarr.
 
+### La primera carga
+
+La primera vez tarda, y ese rato tiene explicación: hay que descargar enteros
+los catálogos de Plex, Radarr y Sonarr —varios megabytes si la biblioteca es
+grande— y además resolver los pósteres que no traen ya puesto el identificador.
+Mientras eso pasa, abajo a la derecha aparece una barrita que va diciendo por
+dónde va: primero qué servicio está leyendo y luego cuántos títulos lleva
+identificados. Se cierra sola al acabar, no vuelve a salir en el resto de la
+página, y si molesta se quita con un clic.
+
+Las dos esperas corren a la vez en lugar de una detrás de otra, las bibliotecas
+de Plex se piden en paralelo y las consultas repetidas de una misma página se
+agrupan en una sola: un póster y su título son dos enlaces distintos, pero
+preguntan lo mismo. De la segunda visita en adelante casi todo sale de la caché
+y la barra ni llega a asomar.
+
 ## Si los distintivos funcionan pero el envío da "tiempo de espera agotado"
 
 Radarr y Sonarr no guardan los metadatos de las películas: los piden a
