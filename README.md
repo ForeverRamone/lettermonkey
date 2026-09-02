@@ -121,6 +121,26 @@ agrupan en una sola: un póster y su título son dos enlaces distintos, pero
 preguntan lo mismo. De la segunda visita en adelante casi todo sale de la caché
 y la barra ni llega a asomar.
 
+## Direcciones de los servicios
+
+Se pueden escribir con esquema o sin él: `192.168.1.10:32400`, `plex.local:32400`
+y `http://plex.local:32400` valen lo mismo. El script las completa antes de
+usarlas, y eso importa más de lo que parece: una dirección sin `http://` es una
+ruta relativa para el navegador, así que antes acababa resolviéndose contra la
+propia web y la petición salía hacia ella **con el token de Plex o la API key en
+la cabecera**. Ahora eso no puede pasar: además de completarlas, sólo se sale a
+direcciones absolutas y sólo hacia TMDB, la propia web y los servicios que hayas
+configurado.
+
+## Si tu Plex es antiguo
+
+Las bibliotecas creadas con los agentes viejos (`com.plexapp.agents.imdb`,
+`.themoviedb`, `.thetvdb`) no guardan el identificador de TMDB, sino el de IMDb.
+Esas fichas se indexan y se consultan igual: cuando un título no aparece por
+TMDB ni por TVDB, se pregunta su IMDb y se busca por ahí. Sólo se hace esa
+consulta de más si tu índice tiene alguna clave de ese tipo, así que a una
+biblioteca moderna no le cuesta ni una petición.
+
 ## Si los distintivos funcionan pero el envío da "tiempo de espera agotado"
 
 Radarr y Sonarr no guardan los metadatos de las películas: los piden a
