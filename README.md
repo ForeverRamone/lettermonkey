@@ -57,6 +57,7 @@ la restricción de verdad la impone el script.
 | Naranja oscuro, `↓` | Monitorizada, todavía sin archivo | Abre la ficha en Radarr/Sonarr |
 | Azul, `+R` / `+S` | No la tienes | La envía a Radarr o a Sonarr |
 | Gris, `?` | TMDB no ha dado una coincidencia fiable | Abre el selector de candidatos |
+| Cualquiera, atenuado y con borde discontinuo | Provisional: sale del índice guardado, que ha caducado, mientras llega el nuevo | Lo mismo que sin atenuar; enviar espera antes al índice nuevo |
 | Rojo, `!` | Error; el motivo está en el tooltip | Reintenta |
 
 **Mayús+clic** sobre cualquier distintivo abre el selector de candidatos, por si
@@ -68,9 +69,10 @@ cuadra exactamente, se pide elegir en lugar de arriesgar.
 
 ## Cómo funciona
 
-Los catálogos de Plex, Radarr y Sonarr se descargan enteros una vez cada seis
-horas y se indexan por identificador (`tmdb`, `imdb`, `tvdb`). Navegar no genera
-ni una petición a esos servicios: solo se consulta el índice en memoria.
+Los catálogos de Plex, Radarr y Sonarr se descargan una vez cada seis horas (es
+la caducidad por defecto, se cambia en los ajustes) y se indexan por
+identificador (`tmdb`, `imdb`, `tvdb`). Navegar no genera ni una petición a esos
+servicios: solo se consulta el índice en memoria.
 
 Cada clave del índice lleva delante si es película o serie, y no es un detalle
 menor: TMDB y TVDB numeran los dos catálogos por separado, así que el mismo
@@ -83,14 +85,17 @@ Para saber a qué película de TMDB corresponde cada póster, Letterboxd pone la
 cosas mucho más fáciles que otras webs:
 
 - **En una ficha** el identificador viene dado. Letterboxd lo publica en el
-  propio `<body>`, en `data-tmdb-id`, y además en el enlace a TMDB del pie, que
-  sirve de respaldo. La coincidencia es exacta y no cuesta ni una petición, y
+  enlace a TMDB del pie de la ficha, que es el que manda, y además en el propio
+  `<body>`, en `data-tmdb-id`, que solo sirve de respaldo (ver más abajo por
+  qué). La coincidencia es exacta y no cuesta ni una petición, y
   manda sobre cualquier cosa que se hubiera deducido antes desde una rejilla:
   abrir la ficha corrige lo que estuviera mal guardado. Lo que hayas elegido a
   mano se respeta.
 - **En rejillas y listas** cada póster lleva el título y el año en
-  `data-item-name` ("Interstellar (2014)"). Como los datos de Letterboxd salen
-  de TMDB, buscar por título y año acierta a la primera casi siempre.
+  `data-item-full-display-name` ("Interstellar (2014)"), y el título solo en
+  `data-item-name`. No lleva el identificador de TMDB, así que hay que buscarlo
+  por título y año. Como los datos de Letterboxd salen de TMDB, eso suele
+  acertar a la primera.
 - **Si aun así hay dudas**, el script abre la ficha en segundo plano y coge de
   ahí el identificador exacto. Ese caso es raro, y el resultado se cachea para
   siempre.
@@ -107,19 +112,49 @@ ahí primero y solo usa los atributos del `<body>` como respaldo.
 
 ### La primera carga
 
-La primera vez tarda, y ese rato tiene explicación: hay que descargar enteros
-los catálogos de Plex, Radarr y Sonarr —varios megabytes si la biblioteca es
-grande— y además resolver los pósteres que no traen ya puesto el identificador.
-Mientras eso pasa, abajo a la derecha aparece una barrita que va diciendo por
-dónde va: primero qué servicio está leyendo y luego cuántos títulos lleva
-identificados. Se cierra sola al acabar, no vuelve a salir en el resto de la
-página, y si molesta se quita con un clic.
+La primera vez tarda, y ese rato tiene explicación: hay que descargar los
+catálogos de Plex, Radarr y Sonarr y además resolver en TMDB los pósters de la
+página, que no traen el identificador. Mientras eso pasa, abajo a la derecha
+aparece una barrita que va diciendo por dónde va: primero qué servicio está
+leyendo y luego cuántos títulos lleva identificados. Se cierra sola al acabar, no
+vuelve a salir en el resto de la página, y si molesta se quita con un clic.
 
-Las dos esperas corren a la vez en lugar de una detrás de otra, las bibliotecas
-de Plex se piden en paralelo y las consultas repetidas de una misma página se
-agrupan en una sola: un póster y su título son dos enlaces distintos, pero
-preguntan lo mismo. De la segunda visita en adelante casi todo sale de la caché
-y la barra ni llega a asomar.
+Para que sea lo más corta posible sin que ningún distintivo salga distinto:
+
+- **Del catálogo de Plex solo se pide lo que el índice mira**: tipo, ratingKey,
+  título, año e identificadores. La sinopsis, las rutas de los ficheros, el
+  reparto o los géneros eran casi toda la descarga y no se usaban. Que Plex deje
+  campos fuera con `excludeFields` y `excludeElements` no está en la
+  documentación oficial, así que el script lo comprueba en cada descarga: pide
+  enteros, de uno en uno, unos pocos títulos (los que tendrían más que perder) y
+  los compara con los recortados. Si algo no cuadra, o Plex rechaza los
+  parámetros, se pide el catálogo entero, como antes.
+- **Los índices se piden nada más arrancar**, no cuando el primer póster entra
+  en pantalla.
+- **Cada distintivo espera solo lo suyo**: una película espera a Plex y a
+  Radarr, no a Sonarr, y una serie no espera a Radarr. Con Sonarr lento o
+  apagado, las películas ya no se quedan girando.
+- **Las peticiones se limitan por servidor, no por título**, así que un título
+  difícil ya no retiene a los fáciles. Las consultas repetidas de una misma página
+  se agrupan en una sola: un póster y su título son dos enlaces distintos, pero
+  preguntan lo mismo. Las bibliotecas de Plex se piden en paralelo.
+- **Si una consulta recibe un 429 (TMDB cuando se le aprieta) o un 503, se
+  reintenta** con espera, respetando `Retry-After`, en lugar de dejar el
+  distintivo en rojo o dar por hecho que no hay coincidencia. Las altas en
+  Radarr y Sonarr no se reintentan: repetir una que sí se hizo daría dos.
+- **El índice se guarda en un momento libre**, no antes de pintar. Si un servicio
+  falla, o no lo tienes configurado, ya no se reescriben los índices de los
+  demás en cada carga.
+
+De la segunda visita en adelante casi todo sale de la caché y la barra ni llega a
+asomar.
+
+**Cuando el índice guardado ha caducado**, ya no se tira: los distintivos se
+pintan al momento con él y el índice nuevo se descarga por detrás. Mientras
+llega, cada distintivo pintado así sale atenuado y con borde discontinuo, y al
+pasar por encima lo dice: es provisional. Cuando llega lo nuevo, se repinta. Si
+pulsas para enviar algo en ese rato, el script espera antes al índice nuevo. Si
+resulta que ya la tenías, te lo dice en lugar de mandarla.
 
 ## Direcciones de los servicios
 
@@ -217,7 +252,31 @@ máquina de Radarr, o enrutar solo ese dominio por otra salida.
 - Solo se marcan los enlaces a la ficha de una película. Los que Letterboxd
   inyecta bajo cada póster con el número de visionados, listas y me gusta
   apuntan también a `/film/...`, pero no son títulos y se ignoran.
-- Los distintivos se resuelven cuando entran en pantalla, no todos de golpe.
+- Los distintivos se resuelven cuando entran en pantalla, no todos de golpe. Los
+  índices, en cambio, se piden al cargar la página, haya pósters o no.
 - Cambiar el número de peticiones en paralelo requiere recargar la página.
 - Si Plex, Radarr o Sonarr no responden, el script sigue usando el último índice
   bueno que tuviera guardado en lugar de quedarse sin datos.
+- La descarga del catálogo de Plex tiene dos minutos de margen, no los treinta
+  segundos del resto: con una biblioteca grande y una conexión lenta no cabía, y
+  un índice de Plex con error deja todo lo que tienes como si faltara.
+
+## Banco de pruebas
+
+En [`test/`](test/) hay un banco que ejecuta el script de verdad en jsdom, con el
+almacén y la red de Tampermonkey simulados: Plex con una biblioteca sintética
+grande, Radarr, Sonarr, TMDB y las fichas de Letterboxd. Compara una versión de
+referencia con la del directorio de trabajo en los mismos escenarios: en frío,
+con caché fresca, con caché caducada, con un Plex que entiende el recorte de
+cinco maneras distintas, con TMDB devolviendo 429, con Sonarr lento, apagado o
+sin configurar, en una ficha, y al enviar con el índice caducado. Exige que los
+distintivos salgan idénticos y que el índice de Plex sea idéntico byte a byte. Y
+mide peticiones, bytes, tiempo de `JSON.parse` y lo escrito al almacén.
+
+```bash
+cd test && npm install && node banco.js
+```
+
+`node banco.js --rapido` usa una biblioteca pequeña, y `--base <commit>` cambia
+la versión de referencia (por defecto, la 1.7.0). Los datos son sintéticos: los
+bytes que mide son los del modelo, no los de tu servidor.

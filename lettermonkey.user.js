@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LetterMonkey — Plex / Radarr / Sonarr en Letterboxd
 // @namespace    lettermonkey
-// @version      1.7.0
+// @version      1.8.0
 // @description  Marca sobre cada póster de Letterboxd si la película ya está en tu Plex, y envía a Radarr o Sonarr con un clic las que faltan.
 // @author       ForeverRamone
 // @match        https://letterboxd.com/*
@@ -137,9 +137,9 @@
     // El respiro de flushSoon se reprograma con cada dato nuevo, así que
     // cerrar la pestaña mientras la página seguía resolviendo tiraba todo lo
     // aprendido y había que volver a preguntarlo entero.
-    window.addEventListener('pagehide', flushYa);
+    window.addEventListener('pagehide', function () { flushYa(); volcarIndices(); });
     document.addEventListener('visibilitychange', function () {
-        if (document.visibilityState === 'hidden') flushYa();
+        if (document.visibilityState === 'hidden') { flushYa(); volcarIndices(); }
     });
 
     /* ================================================================== *
@@ -207,6 +207,22 @@
         return host === dominio || host.slice(-(dominio.length + 1)) === '.' + dominio;
     }
 
+    // TMDB contesta 429 cuando se le aprieta, y un Plex o un Radarr ocupados, o
+    // la propia Letterboxd, devuelven 503. Cualquier respuesta que no fuera 2xx
+    // acababa en un distintivo rojo o, si fallaba la ficha, en un "sin
+    // coincidencia" que no era verdad, justo en la primera carga, que es cuando
+    // más peticiones salen de golpe. Las consultas se reintentan con espera
+    // creciente y respetando Retry-After, con tope para no dejar un distintivo
+    // colgado.
+    const REINTENTOS = 3;
+
+    function esperaDe(cabeceras, intento) {
+        const m = /retry-after:\s*(\d+)/i.exec(String(cabeceras || ''));
+        const pedida = m ? parseInt(m[1], 10) * 1000 : 0;
+        if (pedida > 0) return Math.min(pedida, 10000);
+        return Math.min(500 * Math.pow(2, intento), 4000);
+    }
+
     function gmFetch(opts) {
         return new Promise(function (resolve, reject) {
             // Segunda barrera: sólo se sale a direcciones absolutas. Una
@@ -226,6 +242,15 @@
                 timeout: opts.timeout || 30000,
                 onload: function (r) {
                     if (r.status >= 200 && r.status < 300) return resolve(r);
+                    // Sólo lo que se puede repetir sin efectos: un alta que
+                    // devolvió 503 pudo haberse hecho, y repetirla daría dos.
+                    const intento = opts.intento || 0;
+                    const repetible = (opts.method || 'GET') === 'GET';
+                    if (repetible && (r.status === 429 || r.status === 503) && intento < REINTENTOS) {
+                        return setTimeout(function () {
+                            gmFetch(Object.assign({}, opts, { intento: intento + 1 })).then(resolve, reject);
+                        }, esperaDe(r.responseHeaders, intento));
+                    }
                     let detail = '';
                     try {
                         const j = JSON.parse(r.responseText);
@@ -276,7 +301,14 @@
         return (isFinite(v) && v >= 1) ? Math.min(v, 12) : 6;
     }
 
-    const queue = makeQueue(limiteCola(CFG.concurrency));
+    // Una sola cola envolvía la resolución completa de cada título: un título
+    // difícil ocupaba su hueco durante la búsqueda con año, la búsqueda sin año
+    // y la descarga de la ficha, una detrás de otra, y detrás esperaban hasta
+    // los que ya estaban en la caché y no iban a pedir nada. Lo que se limita
+    // ahora es lo que hay en vuelo contra cada servidor, con el mismo tope que
+    // antes tenía el total, y los títulos avanzan a la vez.
+    const colaTmdb  = makeQueue(limiteCola(CFG.concurrency));
+    const colaFicha = makeQueue(limiteCola(CFG.concurrency));
 
     /* ================================================================== *
      * 3. TMDB
@@ -323,7 +355,7 @@
 
         const params = { query: query, language: 'es-ES', include_adult: 'false' };
         if (year) params[kind === 'movie' ? 'primary_release_year' : 'first_air_date_year'] = String(year);
-        const pendiente = gmJSON({ url: tmdbUrl('/search/' + kind, params) })
+        const pendiente = colaTmdb(function () { return gmJSON({ url: tmdbUrl('/search/' + kind, params) }); })
             .then(function (data) {
                 return (data.results || []).slice(0, 10).map(function (r) { return tmdbItem(kind, r); });
             });
@@ -347,26 +379,48 @@
     }
 
     async function tmdbPorId(kind, id) {
-        const data = await gmJSON({ url: tmdbUrl('/' + kind + '/' + id, { language: 'es-ES' }) });
+        const data = await colaTmdb(function () {
+            return gmJSON({ url: tmdbUrl('/' + kind + '/' + id, { language: 'es-ES' }) });
+        });
         return tmdbItem(kind, data);
     }
 
+    // Los identificadores externos se pedían sin deduplicar: el póster y el
+    // título de la misma película preguntaban cada uno por su cuenta, y en una
+    // serie el tvdb y el imdb salían en dos peticiones a la misma dirección, una
+    // detrás de otra. Se guarda la promesa por dirección, y la respuesta deja
+    // anotados los dos datos a la vez. No pasan por la cola de TMDB: antes
+    // tampoco lo hacían, y encolarlos haría esperar a los que faltan en Plex.
+    const EXTERNOS = new Map();
+
+    function externalIds(kind, tmdbId) {
+        const ruta = '/' + kind + '/' + tmdbId;
+        const enCurso = EXTERNOS.get(ruta);
+        if (enCurso) return enCurso;
+        const pendiente = gmJSON({ url: tmdbUrl(ruta + '/external_ids', {}) }).then(function (data) {
+            store.imdb[kind + ':' + tmdbId] = data.imdb_id || null;
+            if (kind === 'tv') store.tvdb[tmdbId] = data.tvdb_id || null;
+            flushSoon();
+            return data;
+        });
+        EXTERNOS.set(ruta, pendiente);
+        // Un fallo no se queda guardado: la próxima vez se vuelve a intentar.
+        pendiente.catch(function () { EXTERNOS.delete(ruta); });
+        return pendiente;
+    }
+
     // Sólo se pregunta cuando la biblioteca de Plex tiene fichas indexadas por
-    // imdb —agentes antiguos— y el título no ha aparecido por tmdb ni por tvdb.
+    // imdb y el título no ha aparecido por tmdb ni por tvdb.
     async function tmdbImdbId(kind, tmdbId) {
         const clave = kind + ':' + tmdbId;
         if (Object.prototype.hasOwnProperty.call(store.imdb, clave)) return store.imdb[clave];
-        const data = await gmJSON({ url: tmdbUrl('/' + kind + '/' + tmdbId + '/external_ids', {}) });
-        store.imdb[clave] = data.imdb_id || null;
-        flushSoon();
+        await externalIds(kind, tmdbId);
         return store.imdb[clave];
     }
 
     async function tmdbTvdbId(tmdbId) {
         if (Object.prototype.hasOwnProperty.call(store.tvdb, tmdbId)) return store.tvdb[tmdbId];
-        const data = await gmJSON({ url: tmdbUrl('/tv/' + tmdbId + '/external_ids', {}) });
-        store.tvdb[tmdbId] = data.tvdb_id || null;
-        flushSoon();
+        await externalIds('tv', tmdbId);
         return store.tvdb[tmdbId];
     }
 
@@ -523,7 +577,9 @@
             let seguro;
             try { seguro = encodeURIComponent(decodeURIComponent(slug)); }
             catch (e) { seguro = encodeURIComponent(slug); }
-            const r = await gmFetch({ url: 'https://letterboxd.com/film/' + seguro + '/' });
+            const r = await colaFicha(function () {
+                return gmFetch({ url: 'https://letterboxd.com/film/' + seguro + '/' });
+            });
             const doc = new DOMParser().parseFromString(r.responseText, 'text/html');
             const data = readFilmPage(doc);
             return data && data.tmdbId ? data : null;
@@ -712,7 +768,7 @@
 
     function resolveMatchUnaVez(meta) {
         const clave = meta && meta.slug;
-        const arrancar = function () { return queue(function () { return resolveMatch(meta); }); };
+        const arrancar = function () { return resolveMatch(meta); };
         if (!clave) return arrancar();
 
         const enCurso = RESOLVIENDO.get(clave);
@@ -753,7 +809,13 @@
             }
         }
         // Agentes antiguos: com.plexapp.agents.imdb://tt0133093?lang=es
-        const legacy = /com\.plexapp\.agents\.(imdb|themoviedb|thetvdb):\/\/([^?/]+)/.exec(String(item.guid || ''));
+        // En una biblioteca moderna el guid es "plex://..." y la regex fallaba
+        // en todos los títulos: se busca antes la cadena fija, que es lo mismo
+        // pero sin recorrido de expresión regular por cada uno de miles.
+        const crudo = String(item.guid || '');
+        const legacy = crudo.indexOf('com.plexapp.agents.') !== -1
+            ? /com\.plexapp\.agents\.(imdb|themoviedb|thetvdb):\/\/([^?/]+)/.exec(crudo)
+            : null;
         if (legacy) {
             const kind = { imdb: 'imdb', themoviedb: 'tmdb', thetvdb: 'tvdb' }[legacy[1]];
             out.push(kind + ':' + legacy[2]);
@@ -761,16 +823,104 @@
         return out;
     }
 
+    // De cada título el índice mira el tipo, el ratingKey, el título con su año
+    // y los identificadores (guid y Guid). El listado de una biblioteca trae
+    // además la sinopsis, la ruta de cada fichero, el reparto, los géneros, las
+    // valoraciones y hasta los colores del fondo del póster, y con una
+    // biblioteca grande eso es casi toda la descarga y casi todo el JSON.parse
+    // que congela la pestaña antes del primer distintivo. Se pide sin ello.
+    //
+    // Que Plex deje fuera campos con estos parámetros no está en ninguna
+    // documentación oficial: sale de foros y de clientes de terceros. Así que
+    // el recorte se comprueba contra el listado entero (ver pedirBiblioteca), y
+    // a la mínima duda se pide entero, como siempre.
+    const PLEX_FUERA_CAMPOS = [
+        'summary', 'tagline', 'titleSort', 'originalTitle', 'art', 'thumb',
+        'banner', 'theme', 'studio', 'contentRating', 'slug', 'chapterSource',
+        'primaryExtraKey', 'audienceRatingImage', 'ratingImage',
+        'originallyAvailableAt', 'duration'
+    ].join(',');
+
+    const PLEX_FUERA_ELEMENTOS = [
+        'Media', 'Part', 'Stream', 'Genre', 'Country', 'Director', 'Writer',
+        'Producer', 'Role', 'Rating', 'Image', 'UltraBlurColors', 'Collection',
+        'Label', 'Similar', 'Chapter', 'Marker', 'Extras', 'Field', 'Location',
+        'Preferences', 'Review', 'Mood', 'Style'
+    ].join(',');
+
+    // Una biblioteca grande por una conexión lenta no cabe en los 30 s de
+    // siempre, y un índice de Plex con error deja todo lo que tienes como "no
+    // la tienes" o "en Radarr".
+    const PLEX_TIMEOUT = 120000;
+
+    function urlBiblioteca(root, key, recortar, desde) {
+        let url = root + '/library/sections/' + encodeURIComponent(key) + '/all?includeGuids=1';
+        if (recortar) {
+            url += '&excludeFields=' + encodeURIComponent(PLEX_FUERA_CAMPOS) +
+                   '&excludeElements=' + encodeURIComponent(PLEX_FUERA_ELEMENTOS);
+        }
+        if (desde !== undefined) url += '&X-Plex-Container-Start=' + desde + '&X-Plex-Container-Size=1';
+        return url;
+    }
+
+    // Lo que el índice saca de un título, en una cadena que se puede comparar.
+    function huellaPlex(it) {
+        return [it.ratingKey, it.type, it.title, it.year, guidsOf(it).sort().join(',')].join('|');
+    }
+
+    // El recorte vale sólo si el título que llega recortado da exactamente lo
+    // mismo que el entero. Comprobar que haya algún Guid no basta: un servidor
+    // que entendiera los parámetros de otra manera podría quitarlos sólo a
+    // unos cuantos, y esos se emparejarían por título y año —el último recurso,
+    // el menos fiable— sin que nadie lo notara. Se piden enteros, de uno en
+    // uno, los títulos donde se notaría: el primero y el último sin
+    // identificadores, si los hay, y uno que sí los tenga.
+    //
+    // Devuelve 'si', 'no', o el listado entero si el servidor no hace caso de
+    // la paginación y lo manda todo: entonces ya está pedido y se usa ese.
+    async function muestraCuadra(root, hdr, key, list) {
+        const sinGuid = [], conGuid = [];
+        list.forEach(function (it, i) { (guidsOf(it).length ? conGuid : sinGuid).push(i); });
+        const muestra = [];
+        if (sinGuid.length) muestra.push(sinGuid[0], sinGuid[sinGuid.length - 1]);
+        if (conGuid.length) muestra.push(conGuid[Math.floor(conGuid.length / 2)]);
+        const unicos = muestra.filter(function (i, n) { return muestra.indexOf(i) === n; });
+        for (const i of unicos) {
+            const data = await gmJSON({ url: urlBiblioteca(root, key, false, i), headers: hdr, timeout: PLEX_TIMEOUT });
+            const uno = (data.MediaContainer || {}).Metadata || [];
+            if (uno.length === list.length && list.length > 1) return data;
+            if (uno.length !== 1 || huellaPlex(uno[0]) !== huellaPlex(list[i])) return 'no';
+        }
+        return 'si';
+    }
+
+    async function pedirBiblioteca(root, hdr, key) {
+        try {
+            const data = await gmJSON({ url: urlBiblioteca(root, key, true), headers: hdr, timeout: PLEX_TIMEOUT });
+            const list = (data.MediaContainer || {}).Metadata || [];
+            const completa = list.every(function (it) {
+                return it && it.ratingKey !== undefined && it.ratingKey !== null && it.type && typeof it.title === 'string';
+            });
+            if (list.length && completa) {
+                const veredicto = await muestraCuadra(root, hdr, key, list);
+                if (veredicto === 'si') return data;
+                if (veredicto !== 'no') return veredicto;
+            }
+        } catch (e) { /* se pide entera */ }
+        return gmJSON({ url: urlBiblioteca(root, key, false), headers: hdr, timeout: PLEX_TIMEOUT });
+    }
+
     async function buildPlexIndex() {
         if (!CFG.plexUrl || !CFG.plexToken) throw new Error('Plex sin configurar');
         const root = base(CFG.plexUrl);
         const hdr = plexHeaders();
 
-        let machine = '';
-        try {
-            const ident = await gmJSON({ url: root + '/identity', headers: hdr });
-            machine = (ident.MediaContainer || {}).machineIdentifier || '';
-        } catch (e) { /* el enlace profundo es opcional */ }
+        // El identificador del servidor sólo hace falta para el enlace profundo,
+        // al pulsar. Esperarlo antes de pedir las bibliotecas ponía una ida y
+        // vuelta delante de la descarga pesada: sale a la vez y se recoge al final.
+        const pMachine = gmJSON({ url: root + '/identity', headers: hdr })
+            .then(function (ident) { return (ident.MediaContainer || {}).machineIdentifier || ''; },
+                  function () { return ''; });   // el enlace profundo es opcional
 
         const secs = await gmJSON({ url: root + '/library/sections', headers: hdr });
         const dirs = ((secs.MediaContainer || {}).Directory || [])
@@ -785,10 +935,7 @@
         // Las bibliotecas se piden a la vez: son con diferencia la descarga más
         // pesada del arranque, y encadenarlas sumaba una espera detrás de otra.
         const bibliotecas = await Promise.all(dirs.map(function (d) {
-            return gmJSON({
-                url: root + '/library/sections/' + encodeURIComponent(d.key) + '/all?includeGuids=1',
-                headers: hdr
-            });
+            return pedirBiblioteca(root, hdr, d.key);
         }));
 
         for (const data of bibliotecas) {
@@ -811,7 +958,7 @@
             }
         }
 
-        return { machine: machine, guid: guid, byTitle: byTitle, count: items, imdb: conImdb };
+        return { machine: await pMachine, guid: guid, byTitle: byTitle, count: items, imdb: conImdb };
     }
 
     async function buildRadarrIndex() {
@@ -833,6 +980,13 @@
         const root = base(CFG.sonarrUrl);
         const hdr = { 'X-Api-Key': CFG.sonarrKey };
 
+        // La versión sólo hace falta para dar de alta, no para el índice: el
+        // listado sale a la vez en lugar de esperar detrás. El catch vacío sólo
+        // evita el aviso de promesa rechazada mientras se espera la versión; el
+        // error se trata en el await de más abajo.
+        const pSeries = gmJSON({ url: root + '/api/v3/series', headers: hdr });
+        pSeries.catch(function () {});
+
         let major = 4, languageProfileId = null;
         try {
             const status = await gmJSON({ url: root + '/api/v3/system/status', headers: hdr });
@@ -847,7 +1001,7 @@
             } catch (e) { /* opcional */ }
         }
 
-        const list = await gmJSON({ url: root + '/api/v3/series', headers: hdr });
+        const list = await pSeries;
         const byTvdb = {}, byTmdb = {};
         for (const s of list) {
             const st = s.statistics || {};
@@ -866,46 +1020,148 @@
 
     const BUILDERS = { plex: buildPlexIndex, radarr: buildRadarrIndex, sonarr: buildSonarrIndex };
 
+    const SERVICIOS = ['plex', 'radarr', 'sonarr'];
+
     let indexesReady = null;
+
+    // Una promesa por servicio. Con una sola, la de los tres juntos, un
+    // distintivo de película esperaba también a Sonarr y uno de serie a Radarr:
+    // con Sonarr lento o apagado no se pintaba ni una película, aunque Plex
+    // llevara rato en memoria.
+    const READY = { plex: null, radarr: null, sonarr: null };
+
+    // Lo que hay en el almacén, más lo que se ha ido descargando bien. Se
+    // escribe en un hueco libre del hilo y no antes de soltar los distintivos:
+    // serializar el catálogo de Plex entero es lo último que debe esperar quien
+    // ya tiene el índice en memoria. Y sólo si se ha descargado algo bien:
+    // antes, con Sonarr sin configurar o caído, el intento fallido bastaba para
+    // reescribir los tres índices, Plex incluido, en cada carga de página.
+    let IDX_GUARDADO = {};
+    let guardarPendiente = false;
+
+    const enReposo = window.requestIdleCallback
+        ? function (fn) { window.requestIdleCallback(fn, { timeout: 2000 }); }
+        : function (fn) { setTimeout(fn, 1); };
+
+    // Se anota cada servicio según llega, pero se escribe una sola vez, cuando
+    // han acabado todos (ver loadIndexes): el valor guardado lleva los tres
+    // juntos, y escribirlo por cada uno era serializar Plex dos o tres veces.
+    function anotarIndice(name, data) {
+        IDX_GUARDADO[name] = { ts: Date.now(), v: IDX_VERSION, data: data };
+        guardarPendiente = true;
+    }
+
+    // También al cerrar la pestaña: si no, lo descargado se perdería y la
+    // siguiente carga lo pediría otra vez entero.
+    function volcarIndices() {
+        if (!guardarPendiente) return;
+        guardarPendiente = false;
+        try { writeJSON(IDX_KEY, IDX_GUARDADO); } catch (e) { /* si no cabe, se reconstruye al caducar */ }
+    }
+
+    // Revalidaciones en curso de un índice caducado. No entran en READY a
+    // propósito: si entraran, pintar volvería a esperar la descarga entera.
+    const REVALIDANDO = new Map();
+
+    function repintarServicio(name) {
+        refreshMatching(function (c) {
+            return name === 'plex' || (name === 'sonarr') === (c._match.kind === 'tv');
+        });
+    }
+
+    function revalidar(name) {
+        const enCurso = REVALIDANDO.get(name);
+        if (enCurso) return enCurso;
+        progServicio(name, 'cargando');
+        const tarea = BUILDERS[name]()
+            .then(function (data) {
+                IDX[name] = data;
+                anotarIndice(name, data);
+                progServicio(name, 'listo');
+            }, function () {
+                // Como hasta ahora: si no contesta, se sigue con lo guardado.
+                progServicio(name, 'error');
+            })
+            .then(function () {
+                REVALIDANDO.delete(name);
+                repintarServicio(name);
+            });
+        REVALIDANDO.set(name, tarea);
+        return tarea;
+    }
 
     async function loadIndexes(force) {
         const cached = readMap(IDX_KEY);
+        IDX_GUARDADO = cached;
         // Un valor no numérico daba NaN, y con NaN ningún índice era fresco:
         // se volvía a descargar todo en cada carga.
         const horas = parseInt(CFG.indexTtlHours, 10);
         const ttl = Math.max(1, isFinite(horas) ? horas : 6) * 3600 * 1000;
         const jobs = [];
 
-        for (const name of ['plex', 'radarr', 'sonarr']) {
+        for (const name of SERVICIOS) {
             const entry = cached[name];
             const util  = entry && entry.v === IDX_VERSION;
             const fresh = util && (Date.now() - entry.ts) < ttl;
             if (!force && fresh) {
                 IDX[name] = entry.data;
                 progServicio(name, 'listo');
+                READY[name] = Promise.resolve();
+                continue;
+            }
+            // Caducado: antes se tiraba sin mirarlo, y la primera carga de cada
+            // rato de navegación pagaba la descarga entera con los distintivos
+            // girando. Ahora se pinta ya con lo guardado y se refresca por
+            // detrás, pero sin hacerlo pasar por bueno: mientras llega lo nuevo
+            // el distintivo sale atenuado y lo dice al pasar por encima, y
+            // enviar algo espera a lo nuevo (ver doAdd). Al llegar, se repinta.
+            if (!force && util && entry.data) {
+                IDX[name] = Object.assign({}, entry.data, { stale: true });
+                READY[name] = Promise.resolve();
+                jobs.push(revalidar(name));
                 continue;
             }
             progServicio(name, 'cargando');
-            jobs.push(
-                BUILDERS[name]()
-                    .then(function (data) {
-                        IDX[name] = data;
-                        cached[name] = { ts: Date.now(), v: IDX_VERSION, data: data };
-                        progServicio(name, 'listo');
-                    })
-                    .catch(function (err) {
-                        IDX[name] = { error: err.message || String(err) };
-                        if (util) IDX[name] = Object.assign({}, entry.data, { stale: true });
-                        progServicio(name, 'error');
-                    })
-            );
+            const tarea = BUILDERS[name]()
+                .then(function (data) {
+                    IDX[name] = data;
+                    anotarIndice(name, data);
+                    progServicio(name, 'listo');
+                })
+                .catch(function (err) {
+                    IDX[name] = { error: err.message || String(err) };
+                    if (util) IDX[name] = Object.assign({}, entry.data, { stale: true });
+                    progServicio(name, 'error');
+                });
+            READY[name] = tarea;
+            jobs.push(tarea);
         }
 
         await Promise.all(jobs);
-        // Guardar el índice entero cuesta un buen rato cuando la biblioteca es
-        // grande: solo se reescribe si de verdad se ha descargado algo.
-        if (jobs.length) writeJSON(IDX_KEY, cached);
+        if (guardarPendiente) enReposo(volcarIndices);
         return IDX;
+    }
+
+    // Lo que de verdad hay que esperar para pintar un título: Plex y el servicio
+    // que le toca por tipo. El otro no se consulta nunca.
+    function indicesPara(kind) {
+        const otro = kind === 'tv' ? READY.sonarr : READY.radarr;
+        return Promise.all([READY.plex, otro].filter(Boolean));
+    }
+
+    function serviciosDe(kind) {
+        return ['plex', kind === 'tv' ? 'sonarr' : 'radarr'];
+    }
+
+    // ¿Se está pintando con algo caducado que todavía se está comprobando?
+    function esProvisional(kind) {
+        return serviciosDe(kind).some(function (n) {
+            return !!(IDX[n] && IDX[n].stale && REVALIDANDO.has(n));
+        });
+    }
+
+    function indiceAlDia(kind) {
+        return Promise.all(serviciosDe(kind).map(function (n) { return REVALIDANDO.get(n); }).filter(Boolean));
     }
 
     function ensureIndexes(force) {
@@ -1151,7 +1407,13 @@
         try {
             const cache = readMap(IDX_KEY);
             ['plex', 'radarr', 'sonarr'].forEach(function (n) {
-                if (IDX[n] && !IDX[n].error && cache[n]) cache[n].data = IDX[n];
+                // La marca de caducado es de esta página: guardada, la siguiente
+                // carga la tomaría por un dato del índice.
+                if (IDX[n] && !IDX[n].error && cache[n]) {
+                    const data = Object.assign({}, IDX[n]);
+                    delete data.stale;
+                    cache[n].data = data;
+                }
             });
             writeJSON(IDX_KEY, cache);
         } catch (e) { /* si no cabe, se reconstruye al caducar */ }
@@ -1184,6 +1446,7 @@
         '.ltm-unknown { background:#6b6b6b; }',
         '.ltm-error { background:#a02020; }',
         '.ltm-loading, .ltm-busy { background:#4a4a4a; opacity:.75; cursor:default; }',
+        '.ltm-provisional { opacity:.55; outline:1px dashed rgba(255,255,255,.7); outline-offset:-1px; }',
         '.ltm-picker { position:absolute; z-index:99999; width:340px; max-height:420px; overflow-y:auto;',
         '  overscroll-behavior: contain;',
         '  background:#1e1e1e; color:#eee; border:1px solid #444; border-radius:8px;',
@@ -1242,6 +1505,7 @@
         chip.textContent = label;
         chip.title = tip || def.tip;
         chip._state = state;
+        chip._provisional = false;
     }
 
     function makeChip(meta, mode) {
@@ -1367,7 +1631,7 @@
             // Identificar el título en TMDB no necesita los índices de Plex,
             // Radarr y Sonarr: lanzados a la vez, las dos esperas se solapan en
             // vez de sumarse. El índice solo hace falta al pintar el estado.
-            const indices = ensureIndexes(false);
+            ensureIndexes(false);
             const r = await resolveMatchUnaVez(meta);
             chip._candidates = r.candidates || [];
             chip._meta = r.meta || meta;
@@ -1378,7 +1642,7 @@
                 return;
             }
             chip._match = r.match;
-            await indices;
+            await indicesPara(r.match.kind);
             await applyStatus(chip);
         } catch (e) {
             setChip(chip, 'error', e.message || String(e));
@@ -1387,10 +1651,20 @@
         }
     }
 
+    let pinturas = 0;
+
     async function applyStatus(chip) {
         const match = chip._match;
         if (!match) return;
+        // statusFor lee los índices antes de su primera espera, así que esto
+        // dice si lo que va a pintar viene de un índice que se está refrescando.
+        const provisional = esProvisional(match.kind);
+        // Si mientras se averigua el estado empieza otra pintura de este mismo
+        // distintivo —ha llegado el índice nuevo—, ésta llega tarde y no debe
+        // pisar a la otra con datos viejos.
+        const turno = chip._turno = ++pinturas;
         const st = await statusFor(match);
+        if (chip._turno !== turno) return;
         chip._status = st;
         const service = match.kind === 'tv' ? 'Sonarr' : 'Radarr';
         const name = (match.title || '') + (match.year ? ' (' + match.year + ')' : '');
@@ -1402,6 +1676,11 @@
             setChip(chip, 'queued', 'En ' + service + ' sin archivo todavia: ' + name);
         } else {
             setChip(chip, 'missing', 'No la tienes. Clic para enviar a ' + service + ': ' + name);
+        }
+        if (provisional) {
+            chip.classList.add('ltm-provisional');
+            chip.title += '\n(Con el índice guardado, que ha caducado: comprobando si ha cambiado)';
+            chip._provisional = true;
         }
     }
 
@@ -1436,6 +1715,19 @@
         ENVIANDO.add(clave);
         setChip(chip, 'busy', 'Enviando a ' + service);
         try {
+            // Con el índice caducado todavía refrescándose, "no la tienes" es
+            // provisional. Mandarla así podía acabar en un 400 "ya estaba
+            // añadida", o en Radarr pidiendo una película que ya está en Plex.
+            // Se espera a lo nuevo y, si dice otra cosa, se enseña eso.
+            const pendientes = await indiceAlDia(match.kind);
+            if (pendientes.length) {
+                await applyStatus(chip);
+                if (chip._state !== 'missing') {
+                    toast('Al refrescar el indice ya no faltaba: ' + (match.title || ''));
+                    return;
+                }
+                setChip(chip, 'busy', 'Enviando a ' + service);
+            }
             await sendToService(match, chip._status);
             guardarIndices();
             toast('Enviada a ' + service + ': ' + (match.title || ''));
@@ -1514,7 +1806,7 @@
         if (!cands.length) {
             try {
                 const meta = mezclarMeta(chip._meta, store.meta[chip._meta.slug]);
-                const out = await queue(function () { return attemptMatch(meta); });
+                const out = await attemptMatch(meta);
                 cands = out.candidates || [];
                 chip._candidates = cands;
             } catch (e) { cands = []; }
@@ -2121,6 +2413,14 @@
         if (!CFG.tmdbKey || !CFG.plexToken) {
             toast('LetterMonkey necesita configurarse: menu de Tampermonkey, LetterMonkey ajustes', false, 9000);
         }
+
+        // Hasta ahora los índices no se pedían hasta que el primer distintivo
+        // entraba en pantalla, y eso es después del repaso, del montaje y de que
+        // el navegador mida la página, y en una pestaña abierta en segundo plano
+        // el navegador puede no avisar hasta que se mira. Se piden ya: es la
+        // descarga más larga y no depende de nada de la página. La condición
+        // es la misma que pone process antes de pedirlos.
+        if (CFG.tmdbKey) ensureIndexes(false);
 
         scan(document);
 

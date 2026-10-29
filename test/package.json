@@ -1,0 +1,12 @@
+{
+  "name": "lettermonkey-banco",
+  "private": true,
+  "description": "Banco de pruebas de LetterMonkey: ejecuta el script en jsdom con Tampermonkey y la red simulados.",
+  "scripts": {
+    "banco": "node banco.js",
+    "rapido": "node banco.js --rapido"
+  },
+  "devDependencies": {
+    "jsdom": "24.1.3"
+  }
+}
